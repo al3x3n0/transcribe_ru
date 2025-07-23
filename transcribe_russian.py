@@ -14,6 +14,9 @@ import json
 from datetime import datetime
 import torch
 
+# SSL configuration
+from ssl_config import configure_ssl_for_self_signed
+
 # Audio/Video processing
 import ffmpeg
 import whisper
@@ -350,6 +353,9 @@ def main():
     args = parser.parse_args()
     
     try:
+        # Configure SSL if needed
+        configure_ssl_for_self_signed()
+        
         # Set offline mode if requested
         if args.offline:
             os.environ['TRANSFORMERS_OFFLINE'] = '1'

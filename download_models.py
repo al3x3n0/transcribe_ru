@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 import logging
+import ssl
+import urllib.request
 import whisper
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
@@ -14,7 +16,30 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def download_models(model_size="small", model_dir=None, lightweight=False):
+def setup_ssl_context():
+    """Setup SSL context to handle self-signed certificates"""
+    # Create unverified context for self-signed certificates
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    # Monkey patch urllib to use our context
+    urllib.request.urlopen = lambda url, *args, **kwargs: urllib.request.urlopen(
+        url, *args, context=ssl_context, **kwargs
+    ) if 'context' not in kwargs else urllib.request.urlopen(url, *args, **kwargs)
+    
+    # Set environment variables for requests library
+    os.environ['CURL_CA_BUNDLE'] = ''
+    os.environ['REQUESTS_CA_BUNDLE'] = ''
+    
+    # Disable SSL warnings if verify=False is used
+    import warnings
+    warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+    
+    return ssl_context
+
+
+def download_models(model_size="small", model_dir=None, lightweight=False, skip_ssl_verify=False):
     """Download all required models for offline use"""
     
     if model_dir is None:
@@ -23,6 +48,13 @@ def download_models(model_size="small", model_dir=None, lightweight=False):
         model_dir = Path(model_dir)
     
     model_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Setup SSL context if needed
+    if skip_ssl_verify:
+        logger.warning("⚠️  SSL verification disabled - accepting self-signed certificates")
+        setup_ssl_context()
+        # Set transformers to not verify SSL
+        os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = '1'
     
     # Model sizes
     whisper_sizes = {
@@ -79,8 +111,10 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", type=Path, help="Directory to store models")
     parser.add_argument("--lightweight", action="store_true", 
                        help="Download lightweight summarization model")
+    parser.add_argument("--skip-ssl-verify", action="store_true",
+                       help="Skip SSL certificate verification (use for self-signed certificates)")
     
     args = parser.parse_args()
     
-    success = download_models(args.model_size, args.model_dir, args.lightweight)
+    success = download_models(args.model_size, args.model_dir, args.lightweight, args.skip_ssl_verify)
     sys.exit(0 if success else 1)
