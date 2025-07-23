@@ -1,0 +1,24 @@
+# Core dependencies for Russian media transcription and summarization
+# All models run locally - no cloud API calls
+
+# Whisper for local speech recognition
+openai-whisper>=20230918
+
+# Audio/video processing
+ffmpeg-python>=0.2.0
+
+# Transformers for local Russian summarization
+transformers>=4.35.0
+torch>=2.0.0
+sentencepiece>=0.1.99  # Required for Russian tokenizers
+protobuf>=3.20.0
+
+# Progress and utilities
+tqdm>=4.66.0
+
+# Optional but recommended for better performance
+accelerate>=0.24.0  # For faster model loading
+optimum>=1.13.0  # Model optimization
+
+# For GPU support (optional)
+# torch==2.0.0+cu118  # Uncomment and adjust CUDA version as needed
