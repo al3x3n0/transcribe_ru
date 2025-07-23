@@ -7,13 +7,57 @@ import os
 import sys
 from pathlib import Path
 import logging
-import ssl
-import urllib.request
-import whisper
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
+# Configure logging first
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Check for SSL bypass flag early
+def should_skip_ssl():
+    """Check if SSL should be skipped based on args or env"""
+    skip_ssl = os.environ.get('SKIP_SSL_VERIFY', '').lower() in ['1', 'true', 'yes']
+    if '--skip-ssl-verify' in sys.argv:
+        skip_ssl = True
+    return skip_ssl
+
+# Configure SSL BEFORE importing any network libraries
+if should_skip_ssl():
+    logger.warning("⚠️  SSL verification will be disabled")
+    
+    # Set all possible SSL bypass environment variables
+    os.environ['SKIP_SSL_VERIFY'] = '1'
+    os.environ['CURL_CA_BUNDLE'] = ''
+    os.environ['REQUESTS_CA_BUNDLE'] = ''
+    os.environ['SSL_VERIFY'] = 'false'
+    os.environ['PYTHONHTTPSVERIFY'] = '0'
+    os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = '1'
+    os.environ['TRANSFORMERS_OFFLINE'] = '0'  # Allow downloads but skip SSL
+    
+    # Configure SSL context globally
+    import ssl
+    import urllib.request
+    
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    ssl._create_default_https_context = lambda: ssl_context
+    
+    # Patch urllib
+    original_urlopen = urllib.request.urlopen
+    def patched_urlopen(url, *args, **kwargs):
+        kwargs['context'] = ssl_context
+        return original_urlopen(url, *args, **kwargs)
+    urllib.request.urlopen = patched_urlopen
+
+# Now import network libraries after SSL configuration
+import whisper
+
+# Import transformers with SSL already configured
+try:
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+except ImportError as e:
+    logger.error(f"Failed to import transformers: {e}")
+    sys.exit(1)
 
 
 def setup_ssl_context():
@@ -49,12 +93,42 @@ def download_models(model_size="small", model_dir=None, lightweight=False, skip_
     
     model_dir.mkdir(parents=True, exist_ok=True)
     
-    # Setup SSL context if needed
-    if skip_ssl_verify:
-        logger.warning("⚠️  SSL verification disabled - accepting self-signed certificates")
-        setup_ssl_context()
-        # Set transformers to not verify SSL
-        os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = '1'
+    # SSL should already be configured at import time if needed
+    ssl_disabled = should_skip_ssl() or skip_ssl_verify
+    if ssl_disabled:
+        logger.info("🔓 SSL verification is disabled")
+        
+        # Additional runtime SSL bypass for requests
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+            import urllib3
+            
+            # Disable warnings
+            urllib3.disable_warnings()
+            
+            # Create session with SSL disabled
+            session = requests.Session()
+            session.verify = False
+            
+            # Monkey patch requests
+            original_request = requests.request
+            def no_ssl_request(method, url, **kwargs):
+                kwargs['verify'] = False
+                kwargs['timeout'] = kwargs.get('timeout', 120)
+                return original_request(method, url, **kwargs)
+            
+            requests.request = no_ssl_request
+            requests.get = lambda url, **kwargs: no_ssl_request('GET', url, **kwargs)
+            requests.post = lambda url, **kwargs: no_ssl_request('POST', url, **kwargs)
+            
+            logger.info("✓ Patched requests library for SSL bypass")
+            
+        except Exception as e:
+            logger.warning(f"Could not patch requests: {e}")
+    else:
+        logger.info("🔒 SSL verification is enabled")
     
     # Model sizes
     whisper_sizes = {
@@ -90,53 +164,38 @@ def download_models(model_size="small", model_dir=None, lightweight=False, skip_
     summarizer_cache.mkdir(exist_ok=True)
     
     try:
-        # Import and configure SSL before downloading
-        if skip_ssl_verify:
-            from ssl_config import configure_ssl_for_self_signed
-            configure_ssl_for_self_signed()
-        
-        # Download with additional parameters for SSL bypass
+        # Download with SSL configuration already applied
         download_kwargs = {
             'cache_dir': summarizer_cache,
-            'use_auth_token': False,
-            'force_download': False
+            'force_download': False,
+            'resume_download': True
         }
         
-        # Try to add SSL bypass parameters
-        try:
-            import requests
-            # Test if we can patch requests
-            original_get = requests.get
-            
-            def ssl_bypass_get(url, **kwargs):
-                kwargs['verify'] = False
-                kwargs['timeout'] = 60
-                return original_get(url, **kwargs)
-            
-            if skip_ssl_verify:
-                requests.get = ssl_bypass_get
-                
-        except ImportError:
-            pass
+        logger.info(f"📥 Downloading tokenizer for {model_name}...")
+        logger.info(f"    Cache directory: {summarizer_cache}")
+        if ssl_disabled:
+            logger.info("    🔓 Using SSL bypass")
         
-        logger.info(f"Downloading tokenizer for {model_name}...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, **download_kwargs)
+        logger.info("✓ Tokenizer downloaded successfully")
         
-        logger.info(f"Downloading model weights for {model_name}...")
+        logger.info(f"📥 Downloading model weights for {model_name}...")
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **download_kwargs)
+        logger.info("✓ Model weights downloaded successfully")
         
-        logger.info("✓ Russian summarization model downloaded successfully")
-        
-        # Restore original requests.get if we patched it
-        try:
-            if 'original_get' in locals():
-                requests.get = original_get
-        except:
-            pass
+        logger.info("✅ Russian summarization model downloaded successfully")
             
     except Exception as e:
-        logger.error(f"✗ Failed to download summarization model: {e}")
-        logger.info("💡 Try using --skip-ssl-verify flag if you have SSL certificate issues")
+        logger.error(f"❌ Failed to download summarization model: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        
+        if not ssl_disabled:
+            logger.info("💡 If this is an SSL error, try using --skip-ssl-verify flag:")
+            logger.info("   python download_models.py --skip-ssl-verify")
+        else:
+            logger.info("💡 SSL bypass is already enabled. This might be a network connectivity issue.")
+            logger.info("   Check your internet connection and proxy settings.")
+            
         return False
     
     logger.info(f"\n✓ All models downloaded to: {model_dir}")
