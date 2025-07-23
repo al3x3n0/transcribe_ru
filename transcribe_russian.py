@@ -55,7 +55,7 @@ class RussianTranscriber:
     }
     
     def __init__(self, model_size: str = "small", model_dir: Optional[Path] = None, 
-                 device: str = "auto", lightweight: bool = False):
+                 device: str = "auto", lightweight: bool = False, enable_summarization: bool = False):
         """
         Initialize the transcriber with specified Whisper model
         
@@ -64,6 +64,7 @@ class RussianTranscriber:
             model_dir: Directory to store/load models locally
             device: Device to use ('cpu', 'cuda', 'auto')
             lightweight: Use smaller summarization model to save memory
+            enable_summarization: Whether to load summarization models (default: False)
         """
         # Setup model directory
         if model_dir is None:
@@ -88,40 +89,81 @@ class RussianTranscriber:
         
         self.supported_formats = {'.mp3', '.wav', '.m4a', '.flac', '.mp4', '.avi', '.mkv', '.mov', '.webm'}
         
-        # Choose summarizer based on model size or lightweight flag
-        if lightweight or model_size in ['tiny', 'small']:
-            self.summarizer_model_name = self.SUMMARIZER_MODELS['tiny']
-            logger.info("Loading lightweight Russian summarization model (rut5-small)")
+        # Initialize summarization components
+        self.summarizer = None
+        self.use_fallback_summarizer = False
+        self.enable_summarization = enable_summarization
+        
+        if enable_summarization:
+            logger.info("📝 Initializing summarization...")
+            self._load_summarization_models(lightweight, model_size)
         else:
-            self.summarizer_model_name = self.SUMMARIZER_MODELS['base']
-            logger.info("Loading standard Russian summarization model (rut5-base)")
+            logger.info("⏭️  Summarization disabled (transcript only mode) - use --enable-summary to enable")
+    
+    def _load_summarization_models(self, lightweight: bool, model_size: str):
+        """Load summarization models with fallback"""
+        try:
+            # Choose summarizer based on model size or lightweight flag
+            if lightweight or model_size in ['tiny', 'small']:
+                self.summarizer_model_name = self.SUMMARIZER_MODELS['tiny']
+                logger.info("Loading lightweight Russian summarization model (rut5-small)")
+            else:
+                self.summarizer_model_name = self.SUMMARIZER_MODELS['base']
+                logger.info("Loading standard Russian summarization model (rut5-base)")
+                
+            summarizer_cache = self.model_dir / "summarizer"
+            summarizer_cache.mkdir(exist_ok=True)
             
-        summarizer_cache = self.model_dir / "summarizer"
-        summarizer_cache.mkdir(exist_ok=True)
+            # Load with local cache
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.summarizer_model_name,
+                cache_dir=summarizer_cache,
+                local_files_only=False  # Will download first time, then use local
+            )
+            self.summarizer_model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.summarizer_model_name,
+                cache_dir=summarizer_cache,
+                local_files_only=False,  # Will download first time, then use local
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
+            )
+            
+            # Move model to device
+            if self.device == "cuda":
+                self.summarizer_model = self.summarizer_model.to(self.device)
+            
+            self.summarizer = pipeline(
+                "summarization",
+                model=self.summarizer_model,
+                tokenizer=self.tokenizer,
+                device=0 if self.device == "cuda" else -1
+            )
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to load transformer summarization model: {e}")
+            logger.info("🔄 Falling back to simple rule-based summarizer...")
+            self.use_fallback_summarizer = True
+            self._setup_fallback_summarizer()
+    
+    def _setup_fallback_summarizer(self):
+        """Setup simple rule-based Russian summarizer"""
+        import re
         
-        # Load with local cache
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.summarizer_model_name,
-            cache_dir=summarizer_cache,
-            local_files_only=False  # Will download first time, then use local
-        )
-        self.summarizer_model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.summarizer_model_name,
-            cache_dir=summarizer_cache,
-            local_files_only=False,  # Will download first time, then use local
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
-        )
-        
-        # Move model to device
-        if self.device == "cuda":
-            self.summarizer_model = self.summarizer_model.to(self.device)
-        
-        self.summarizer = pipeline(
-            "summarization",
-            model=self.summarizer_model,
-            tokenizer=self.tokenizer,
-            device=0 if self.device == "cuda" else -1
-        )
+        # Russian stop words
+        self.stop_words = {
+            'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то', 'все', 'она', 'так',
+            'его', 'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за', 'бы', 'по', 'только', 'ее', 'мне', 'было',
+            'вот', 'от', 'меня', 'еще', 'нет', 'о', 'из', 'ему', 'теперь', 'когда', 'даже', 'ну', 'вдруг',
+            'ли', 'если', 'уже', 'или', 'ни', 'быть', 'был', 'него', 'до', 'вас', 'нибудь', 'опять', 'уж',
+            'вам', 'ведь', 'там', 'потом', 'себя', 'ничего', 'ей', 'может', 'они', 'тут', 'где', 'есть',
+            'надо', 'ней', 'для', 'мы', 'тебя', 'их', 'чем', 'была', 'сам', 'чтоб', 'без', 'будто', 'чего',
+            'раз', 'тоже', 'себе', 'под', 'будет', 'ж', 'тогда', 'кто', 'этот', 'того', 'потому', 'этого',
+            'какой', 'совсем', 'ним', 'здесь', 'этом', 'один', 'почти', 'мой', 'тем', 'чтобы', 'нее', 'сейчас',
+            'были', 'куда', 'зачем', 'всех', 'никогда', 'можно', 'при', 'наконец', 'два', 'об', 'другой', 'хоть',
+            'после', 'над', 'больше', 'тот', 'через', 'эти', 'нас', 'про', 'всего', 'них', 'какая', 'много',
+            'разве', 'три', 'эту', 'моя', 'впрочем', 'хорошо', 'свою', 'этой', 'перед', 'иногда', 'лучше', 'чуть',
+            'том', 'нельзя', 'такой', 'им', 'более', 'всегда', 'конечно', 'всю', 'между'
+        }
+        logger.info("✓ Fallback summarizer initialized")
     
     def extract_audio(self, input_path: Path, output_path: Optional[Path] = None) -> Path:
         """
@@ -162,18 +204,86 @@ class RussianTranscriber:
         Returns:
             Transcription result dictionary
         """
-        logger.info(f"Starting transcription of: {audio_path}")
+        logger.info(f"🎙️  Starting transcription of: {audio_path}")
         
-        # Transcribe with Whisper
-        result = self.model.transcribe(
-            str(audio_path),
-            language=language,
-            task="transcribe",
-            verbose=False,
-            fp16=False  # Disable FP16 for CPU
-        )
+        # Get audio duration for progress estimation
+        try:
+            import librosa
+            duration = librosa.get_duration(filename=str(audio_path))
+            logger.info(f"📏 Audio duration: {duration:.1f} seconds")
+        except:
+            duration = None
         
-        logger.info(f"Transcription completed. Duration: {result.get('duration', 0):.2f} seconds")
+        # Enhanced progress tracking for transcription
+        from tqdm import tqdm
+        import time
+        import threading
+        
+        # Progress tracking variables  
+        progress_bar = None
+        transcription_done = threading.Event()
+        
+        def show_enhanced_progress():
+            """Show enhanced progress bar with better estimation"""
+            if duration:
+                # Create progress bar with custom format
+                progress_bar = tqdm(
+                    total=int(duration), 
+                    desc="🎙️  Transcribing audio", 
+                    unit="sec",
+                    bar_format='{desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}] {rate_fmt}',
+                    ncols=80,
+                    colour='green'
+                )
+                
+                start_time = time.time()
+                last_update = 0
+                
+                while not transcription_done.wait(0.5):  # Update every 0.5 seconds
+                    elapsed = time.time() - start_time
+                    
+                    # Whisper processes roughly in real-time, sometimes faster
+                    # Estimate progress based on elapsed time vs audio duration
+                    estimated_progress = min(elapsed, duration)
+                    
+                    if estimated_progress > last_update:
+                        progress_bar.n = estimated_progress
+                        progress_bar.refresh()
+                        last_update = estimated_progress
+                
+                # Complete the progress bar
+                progress_bar.n = progress_bar.total
+                progress_bar.refresh()
+                progress_bar.close()
+            else:
+                # Fallback spinner for unknown duration
+                spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                i = 0
+                while not transcription_done.wait(0.1):
+                    print(f"\r🎙️  Transcribing... {spinner_chars[i % len(spinner_chars)]}", end="", flush=True)
+                    i += 1
+                print(f"\r🎙️  Transcribing... ✅ Done!     ")
+        
+        # Start enhanced progress thread
+        progress_thread = threading.Thread(target=show_enhanced_progress)
+        progress_thread.daemon = True
+        progress_thread.start()
+        
+        try:
+            # Transcribe with Whisper
+            result = self.model.transcribe(
+                str(audio_path),
+                language=language,
+                task="transcribe",
+                verbose=False,
+                fp16=False  # Disable FP16 for CPU
+            )
+            
+        finally:
+            # Stop progress tracking
+            transcription_done.set()
+        
+        logger.info(f"✅ Transcription completed. Duration: {result.get('duration', 0):.2f} seconds")
         return result
     
     def summarize_text(self, text: str, max_length: int = 300, min_length: int = 50) -> str:
@@ -186,36 +296,101 @@ class RussianTranscriber:
             min_length: Minimum length of summary
             
         Returns:
-            Summary text
+            Summary text or empty string if summarization disabled
         """
+        if not self.enable_summarization:
+            logger.info("⏭️  Summarization disabled")
+            return ""
+        
         logger.info("Generating summary")
         
-        # Split text into chunks if too long
-        max_chunk_length = 1000
-        chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
+        if self.use_fallback_summarizer:
+            return self._fallback_summarize(text, max_sentences=3)
         
-        summaries = []
-        for chunk in tqdm(chunks, desc="Summarizing chunks"):
-            summary = self.summarizer(
-                chunk,
-                max_length=max_length,
-                min_length=min_length,
-                do_sample=False
-            )
-            summaries.append(summary[0]['summary_text'])
+        try:
+            # Split text into chunks if too long
+            max_chunk_length = 1000
+            chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
+            
+            summaries = []
+            for chunk in tqdm(chunks, desc="Summarizing chunks"):
+                summary = self.summarizer(
+                    chunk,
+                    max_length=max_length,
+                    min_length=min_length,
+                    do_sample=False
+                )
+                summaries.append(summary[0]['summary_text'])
+            
+            # Combine summaries if multiple chunks
+            if len(summaries) > 1:
+                combined_text = " ".join(summaries)
+                final_summary = self.summarizer(
+                    combined_text,
+                    max_length=max_length,
+                    min_length=min_length,
+                    do_sample=False
+                )
+                return final_summary[0]['summary_text']
+            
+            return summaries[0] if summaries else ""
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Transformer summarization failed: {e}")
+            logger.info("🔄 Using fallback summarizer...")
+            return self._fallback_summarize(text, max_sentences=3)
+    
+    def _fallback_summarize(self, text: str, max_sentences: int = 3) -> str:
+        """Simple extractive summarization for Russian text"""
+        import re
         
-        # Combine summaries if multiple chunks
-        if len(summaries) > 1:
-            combined_text = " ".join(summaries)
-            final_summary = self.summarizer(
-                combined_text,
-                max_length=max_length,
-                min_length=min_length,
-                do_sample=False
-            )
-            return final_summary[0]['summary_text']
+        # Clean text
+        text = re.sub(r'\s+', ' ', text.strip())
         
-        return summaries[0] if summaries else ""
+        # Split into sentences
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if len(sentences) <= max_sentences:
+            return text
+        
+        # Get word frequencies
+        words = re.findall(r'\b\w+\b', text.lower())
+        words = [w for w in words if w not in self.stop_words and len(w) > 2]
+        
+        word_freq = {}
+        for word in words:
+            word_freq[word] = word_freq.get(word, 0) + 1
+        
+        # Normalize frequencies
+        if word_freq:
+            max_freq = max(word_freq.values())
+            for word in word_freq:
+                word_freq[word] = word_freq[word] / max_freq
+        
+        # Score sentences
+        sentence_scores = []
+        for i, sentence in enumerate(sentences):
+            words_in_sent = re.findall(r'\b\w+\b', sentence.lower())
+            words_in_sent = [w for w in words_in_sent if w not in self.stop_words and len(w) > 2]
+            
+            if not words_in_sent:
+                score = 0
+            else:
+                score = sum(word_freq.get(word, 0) for word in words_in_sent) / len(words_in_sent)
+            
+            sentence_scores.append((score, i, sentence))
+        
+        # Sort by score and take top sentences
+        sentence_scores.sort(reverse=True)
+        top_sentences = sentence_scores[:max_sentences]
+        
+        # Sort by original order
+        top_sentences.sort(key=lambda x: x[1])
+        
+        # Join selected sentences
+        summary = '. '.join([sent[2] for sent in top_sentences])
+        return summary + '.' if summary else text[:500] + "..."
     
     def process_media_file(self, input_path: Path, output_dir: Optional[Path] = None) -> Tuple[str, str]:
         """
@@ -266,11 +441,12 @@ class RussianTranscriber:
                 f.write(transcript)
             logger.info(f"Transcript saved to: {transcript_path}")
             
-            # Save summary
-            summary_path = output_dir / f"{base_name}_summary.txt"
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write(summary)
-            logger.info(f"Summary saved to: {summary_path}")
+            # Save summary if enabled
+            if self.enable_summarization and summary:
+                summary_path = output_dir / f"{base_name}_summary.txt"
+                with open(summary_path, 'w', encoding='utf-8') as f:
+                    f.write(summary)
+                logger.info(f"Summary saved to: {summary_path}")
             
             # Save full results as JSON
             results_path = output_dir / f"{base_name}_results.json"
@@ -280,9 +456,14 @@ class RussianTranscriber:
                 'duration': transcription_result.get('duration', 0),
                 'language': transcription_result.get('language', 'ru'),
                 'transcript': transcript,
-                'summary': summary,
+                'summarization_enabled': self.enable_summarization,
                 'segments': transcription_result.get('segments', [])
             }
+            
+            # Only add summary if enabled and generated
+            if self.enable_summarization:
+                results['summary'] = summary
+            
             with open(results_path, 'w', encoding='utf-8') as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
             logger.info(f"Full results saved to: {results_path}")
@@ -349,6 +530,11 @@ def main():
         action="store_true",
         help="Use lightweight models to reduce memory usage"
     )
+    parser.add_argument(
+        "--enable-summary",
+        action="store_true",
+        help="Enable summarization (requires additional model downloads)"
+    )
     
     args = parser.parse_args()
     
@@ -366,7 +552,8 @@ def main():
             model_size=args.model,
             model_dir=args.model_dir,
             device=args.device,
-            lightweight=args.lightweight
+            lightweight=args.lightweight,
+            enable_summarization=args.enable_summary
         )
         
         # Process file
@@ -380,10 +567,15 @@ def main():
         print("TRANSCRIPT:")
         print("="*50)
         print(transcript[:500] + "..." if len(transcript) > 500 else transcript)
-        print("\n" + "="*50)
-        print("SUMMARY:")
-        print("="*50)
-        print(summary)
+        
+        if args.enable_summary and summary:
+            print("\n" + "="*50)
+            print("SUMMARY:")
+            print("="*50)
+            print(summary)
+        elif not args.enable_summary:
+            print("\n" + "⏭️  Summarization disabled (use --enable-summary to enable)")
+        
         print("="*50 + "\n")
         
         logger.info("Processing completed successfully!")

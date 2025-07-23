@@ -42,7 +42,14 @@ pip install -r requirements.txt
 
 3. (Optional) Pre-download models for offline use:
 ```bash
+# Download Whisper only (default - transcript mode)
 python download_models.py --model-size large
+
+# Download both Whisper and summarization models
+python download_models.py --enable-summary --model-size large
+
+# If you have SSL certificate issues:
+python download_models.py --skip-ssl-verify
 ```
 
 ## Usage
@@ -77,6 +84,7 @@ python transcribe_russian.py input_file.mp4 --offline
 - `--min-summary-length`: Minimum summary length in tokens (default: 50)
 - `--offline`: Use only locally cached models (no downloads)
 - `--lightweight`: Use smaller models to reduce memory usage
+- `--enable-summary`: Enable summarization (requires additional model downloads)
 
 ## Output Files
 
@@ -102,6 +110,34 @@ First run will download models (~1.5GB for Whisper large, ~500MB for summarizer)
 - ~3GB disk space for model storage
 - GPU optional but recommended for faster processing (CUDA-compatible)
 
+## Download Issues & Alternatives
+
+If you encounter download issues (SSL, network, corporate firewall):
+
+### Option 1: SSL Bypass
+```bash
+python download_models.py --skip-ssl-verify
+```
+
+### Option 2: Use Fallback Summarizer (No Downloads)
+```bash
+python alternative_download.py
+# This creates a simple rule-based Russian summarizer
+```
+
+### Option 3: Manual Download
+1. Visit: https://huggingface.co/cointegrated/rut5-small
+2. Download files to `~/.cache/russian_transcriber/summarizer/`
+3. Or run: `python alternative_download.py --help`
+
+### Option 4: Skip Summarization
+```bash
+# Just transcription, no summary
+python transcribe_russian.py file.mp4 --no-summary
+```
+
+The script automatically falls back to rule-based summarization if model downloads fail.
+
 ## Performance Tips
 
 1. Use smaller Whisper models (tiny, base) for faster processing
@@ -113,11 +149,14 @@ First run will download models (~1.5GB for Whisper large, ~500MB for summarizer)
 ## Examples
 
 ```bash
-# Quick transcription with minimal resources
-python transcribe_russian.py podcast.mp3 --model tiny --lightweight
+# Default - transcript only (fastest, no extra downloads)
+python transcribe_russian.py podcast.mp3
 
-# Balanced quality and speed (default)
-python transcribe_russian.py video.mp4
+# With summarization enabled
+python transcribe_russian.py podcast.mp3 --enable-summary
+
+# Quick transcription with minimal resources
+python transcribe_russian.py podcast.mp3 --model tiny
 
 # High quality transcription
 python transcribe_russian.py important_lecture.mp4 --model large
@@ -125,6 +164,6 @@ python transcribe_russian.py important_lecture.mp4 --model large
 # Process with GPU acceleration
 python transcribe_russian.py video.mp4 --device cuda
 
-# Offline mode with custom models directory
-python transcribe_russian.py audio.wav --offline --model-dir ./models
+# Full featured with summarization
+python transcribe_russian.py video.mp4 --enable-summary --model large --device cuda
 ```

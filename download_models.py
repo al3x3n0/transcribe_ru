@@ -83,8 +83,8 @@ def setup_ssl_context():
     return ssl_context
 
 
-def download_models(model_size="small", model_dir=None, lightweight=False, skip_ssl_verify=False):
-    """Download all required models for offline use"""
+def download_models(model_size="small", model_dir=None, lightweight=False, skip_ssl_verify=False, skip_summarization=True):
+    """Download required models for offline use"""
     
     if model_dir is None:
         model_dir = Path.home() / ".cache" / "russian_transcriber"
@@ -152,7 +152,13 @@ def download_models(model_size="small", model_dir=None, lightweight=False, skip_
         logger.error(f"✗ Failed to download Whisper model: {e}")
         return False
     
-    # Download summarization model
+    # Download summarization model (optional)
+    if skip_summarization:
+        logger.info("⏭️  Skipping summarization model download (--no-summary mode)")
+        logger.info(f"\n✓ Whisper model downloaded to: {model_dir}")
+        logger.info("You can now run transcription with --no-summary flag")
+        return True
+        
     if lightweight or model_size in ['tiny', 'small']:
         model_name = "cointegrated/rut5-small"
         logger.info("Downloading lightweight Russian summarization model (85 MB)...")
@@ -214,8 +220,11 @@ if __name__ == "__main__":
                        help="Download lightweight summarization model")
     parser.add_argument("--skip-ssl-verify", action="store_true",
                        help="Skip SSL certificate verification (use for self-signed certificates)")
+    parser.add_argument("--enable-summary", action="store_true",
+                       help="Download summarization models (default: transcript only)")
     
     args = parser.parse_args()
     
-    success = download_models(args.model_size, args.model_dir, args.lightweight, args.skip_ssl_verify)
+    success = download_models(args.model_size, args.model_dir, args.lightweight, 
+                             args.skip_ssl_verify, not args.enable_summary)
     sys.exit(0 if success else 1)
