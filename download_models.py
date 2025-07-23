@@ -90,11 +90,53 @@ def download_models(model_size="small", model_dir=None, lightweight=False, skip_
     summarizer_cache.mkdir(exist_ok=True)
     
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=summarizer_cache)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, cache_dir=summarizer_cache)
+        # Import and configure SSL before downloading
+        if skip_ssl_verify:
+            from ssl_config import configure_ssl_for_self_signed
+            configure_ssl_for_self_signed()
+        
+        # Download with additional parameters for SSL bypass
+        download_kwargs = {
+            'cache_dir': summarizer_cache,
+            'use_auth_token': False,
+            'force_download': False
+        }
+        
+        # Try to add SSL bypass parameters
+        try:
+            import requests
+            # Test if we can patch requests
+            original_get = requests.get
+            
+            def ssl_bypass_get(url, **kwargs):
+                kwargs['verify'] = False
+                kwargs['timeout'] = 60
+                return original_get(url, **kwargs)
+            
+            if skip_ssl_verify:
+                requests.get = ssl_bypass_get
+                
+        except ImportError:
+            pass
+        
+        logger.info(f"Downloading tokenizer for {model_name}...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **download_kwargs)
+        
+        logger.info(f"Downloading model weights for {model_name}...")
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **download_kwargs)
+        
         logger.info("✓ Russian summarization model downloaded successfully")
+        
+        # Restore original requests.get if we patched it
+        try:
+            if 'original_get' in locals():
+                requests.get = original_get
+        except:
+            pass
+            
     except Exception as e:
         logger.error(f"✗ Failed to download summarization model: {e}")
+        logger.info("💡 Try using --skip-ssl-verify flag if you have SSL certificate issues")
         return False
     
     logger.info(f"\n✓ All models downloaded to: {model_dir}")
